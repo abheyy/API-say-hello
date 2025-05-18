@@ -1,0 +1,52 @@
+name: Deploy to VM
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Deploy to VM
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USERNAME }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            # Stop any existing Node.js process
+            pkill node || true
+            
+            # Create deployment directory if it doesn't exist
+            mkdir -p /home/azureuser/app
+            
+            # Copy files to deployment directory
+            cd /home/azureuser/app
+            rm -rf *
+            
+            # Start the application
+            cd /home/azureuser/app
+            npm install
+            nohup node src/index.js > app.log 2>&1 &
+
+      - name: Copy files to VM
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USERNAME }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          source: "."
+          target: "/home/azureuser/app"
+          strip_components: 0 
