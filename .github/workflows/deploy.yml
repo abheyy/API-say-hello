@@ -19,34 +19,77 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Setup SSH
+        run: |
+          # Create .ssh directory
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          
+          # Write SSH key
+          echo "${{ secrets.VM_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+          # Add host to known_hosts
+          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+          
+          # Test SSH connection
+          ssh -o StrictHostKeyChecking=no azureuser@${{ secrets.VM_HOST }} "echo 'SSH connection successful!'"
+
       - name: Deploy to VM
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USERNAME }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          script: |
+        run: |
+          # First, clean up any existing deployment
+          ssh azureuser@${{ secrets.VM_HOST }} '
             # Stop any existing Node.js process
             pkill node || true
             
-            # Create deployment directory if it doesn't exist
+            # Clean up existing deployment
+            rm -rf /home/azureuser/app
             mkdir -p /home/azureuser/app
             
-            # Copy files to deployment directory
-            cd /home/azureuser/app
-            rm -rf *
+            # Install authbind
+            sudo apt-get update
+            sudo apt-get install -y authbind
             
-            # Start the application
+            # Configure authbind for port 80
+            sudo touch /etc/authbind/byport/80
+            sudo chown azureuser /etc/authbind/byport/80
+            sudo chmod 755 /etc/authbind/byport/80
+          '
+          
+          # Copy files to VM
+          scp -r ./* azureuser@${{ secrets.VM_HOST }}:/home/azureuser/app/
+          
+          # Deploy and start the application
+          ssh azureuser@${{ secrets.VM_HOST }} '
             cd /home/azureuser/app
+            
+            # Install dependencies
             npm install
-            nohup node src/index.js > app.log 2>&1 &
-
-      - name: Copy files to VM
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USERNAME }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          source: "."
-          target: "/home/azureuser/app"
-          strip_components: 0 
+            
+            # Check if port 80 is in use
+            sudo lsof -i :80 || echo "Port 80 is free"
+            
+            # Start the application using authbind
+            authbind --deep node src/index.js > app.log 2>&1 &
+            
+            # Wait for the application to start
+            sleep 5
+            
+            # Check if the process is running
+            ps aux | grep node
+            
+            # Check the application logs
+            cat app.log
+            
+            # Check if the port is actually listening
+            sudo netstat -tulpn | grep :80
+            
+            # Check firewall status
+            sudo ufw status
+            
+            # Test the endpoint locally
+            curl http://localhost/sayHello
+            
+            # Check system logs for any errors
+            sudo journalctl -n 50 | grep -i "node\|error"
+          ' 

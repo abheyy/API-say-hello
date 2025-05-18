@@ -1,0 +1,55 @@
+#!/bin/bash
+
+# Create .ssh directory if it doesn't exist
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+
+# Create or update the SSH key file
+cat > ~/.ssh/id_rsa << 'EOF'
+-----BEGIN RSA PRIVATE KEY-----
+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
+-----END RSA PRIVATE KEY-----
+EOF
+
+# Set proper permissions for the SSH key
+chmod 600 ~/.ssh/id_rsa
+
+# Test SSH connection
+echo "Testing SSH connection..."
+ssh -o StrictHostKeyChecking=no azureuser@172.210.9.122 "echo 'SSH connection successful!'" 
