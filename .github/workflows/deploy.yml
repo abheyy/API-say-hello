@@ -6,7 +6,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -17,79 +17,73 @@ jobs:
           node-version: '18'
 
       - name: Install dependencies
+        shell: pwsh
         run: npm install
 
       - name: Setup SSH
+        shell: pwsh
         run: |
           # Create .ssh directory
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
+          New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.ssh"
           
           # Write SSH key
-          echo "${{ secrets.VM_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
+          $env:VM_SSH_KEY | Out-File -FilePath "$env:USERPROFILE\.ssh\id_rsa" -Encoding utf8
+          icacls "$env:USERPROFILE\.ssh\id_rsa" /inheritance:r /grant:r "$env:USERNAME`:R"
           
           # Add host to known_hosts
-          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H $env:VM_HOST | Out-File -FilePath "$env:USERPROFILE\.ssh\known_hosts" -Append
           
           # Test SSH connection
-          ssh -o StrictHostKeyChecking=no azureuser@${{ secrets.VM_HOST }} "echo 'SSH connection successful!'"
+          ssh -o StrictHostKeyChecking=no azureuser@$env:VM_HOST "echo 'SSH connection successful!'"
 
       - name: Deploy to VM
+        shell: pwsh
         run: |
           # First, clean up any existing deployment
-          ssh azureuser@${{ secrets.VM_HOST }} '
+          $cleanupCommand = @'
             # Stop any existing Node.js process
-            pkill node || true
+            Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
             
             # Clean up existing deployment
-            rm -rf /home/azureuser/app
-            mkdir -p /home/azureuser/app
-            
-            # Install authbind
-            sudo apt-get update
-            sudo apt-get install -y authbind
-            
-            # Configure authbind for port 80
-            sudo touch /etc/authbind/byport/80
-            sudo chown azureuser /etc/authbind/byport/80
-            sudo chmod 755 /etc/authbind/byport/80
-          '
+            Remove-Item -Path "C:\app" -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force -Path "C:\app"
+          '@
+          
+          ssh azureuser@$env:VM_HOST $cleanupCommand
           
           # Copy files to VM
-          scp -r ./* azureuser@${{ secrets.VM_HOST }}:/home/azureuser/app/
+          scp -r ./* azureuser@$env:VM_HOST:/home/azureuser/app/
           
           # Deploy and start the application
-          ssh azureuser@${{ secrets.VM_HOST }} '
+          $deployCommand = @'
             cd /home/azureuser/app
             
             # Install dependencies
             npm install
             
             # Check if port 80 is in use
-            sudo lsof -i :80 || echo "Port 80 is free"
+            netstat -ano | findstr :80
             
-            # Start the application using authbind
-            authbind --deep node src/index.js > app.log 2>&1 &
+            # Start the application
+            Start-Process -FilePath "node" -ArgumentList "src/index.js" -RedirectStandardOutput "app.log" -RedirectStandardError "app.log" -NoNewWindow
             
             # Wait for the application to start
-            sleep 5
+            Start-Sleep -Seconds 5
             
             # Check if the process is running
-            ps aux | grep node
+            Get-Process node
             
             # Check the application logs
-            cat app.log
+            Get-Content app.log
             
             # Check if the port is actually listening
-            sudo netstat -tulpn | grep :80
-            
-            # Check firewall status
-            sudo ufw status
+            netstat -ano | findstr :80
             
             # Test the endpoint locally
-            curl http://localhost/sayHello
+            Invoke-WebRequest -Uri "http://localhost/sayHello" -UseBasicParsing
             
             # Check system logs for any errors
-            sudo journalctl -n 50 | grep -i "node\|error"
-          ' 
+            Get-EventLog -LogName System -Newest 50 | Where-Object { $_.Source -like "*node*" -or $_.Message -like "*error*" }
+          '@
+          
+          ssh azureuser@$env:VM_HOST $deployCommand 

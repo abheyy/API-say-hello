@@ -22,7 +22,7 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: 'Internal Server Error' });
 });
 
-// Start server on port 80
+// Start server on port 80 (requires admin privileges on most systems)
 const PORT = 80;
 const HOST = '0.0.0.0';
 
@@ -61,4 +61,4 @@ process.on('SIGTERM', () => {
         console.log('Server closed');
         process.exit(0);
     });
-}); 
+});
