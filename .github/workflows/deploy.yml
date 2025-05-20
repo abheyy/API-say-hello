@@ -21,69 +21,126 @@ jobs:
         run: npm install
 
       - name: Setup SSH
-        shell: pwsh
-        run: |
-          # Create .ssh directory
-          New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.ssh"
-          
-          # Write SSH key
-          $env:VM_SSH_KEY | Out-File -FilePath "$env:USERPROFILE\.ssh\id_rsa" -Encoding utf8
-          icacls "$env:USERPROFILE\.ssh\id_rsa" /inheritance:r /grant:r "$env:USERNAME`:R"
-          
-          # Add host to known_hosts
-          ssh-keyscan -H $env:VM_HOST | Out-File -FilePath "$env:USERPROFILE\.ssh\known_hosts" -Append
-          
-          # Test SSH connection
-          ssh -o StrictHostKeyChecking=no azureuser@$env:VM_HOST "echo 'SSH connection successful!'"
+        uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{ secrets.VM_SSH_KEY }}
 
-      - name: Deploy to VM
+      - name: Add host to known hosts
         shell: pwsh
         run: |
-          # First, clean up any existing deployment
-          $cleanupCommand = @'
-            # Stop any existing Node.js process
-            Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
+          # Add host to known_hosts
+          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to VM with zero downtime
+        shell: pwsh
+        run: |
+          # Define deployment directories
+          $BLUE_DIR="/home/azureuser/app-blue"
+          $GREEN_DIR="/home/azureuser/app-green"
+          $CURRENT_LINK="/home/azureuser/app-current"
+          $NEXT_LINK="/home/azureuser/app-next"
+          
+          # Determine which environment is currently active and which will be the next
+          $checkCurrentEnv = "if [ -L $CURRENT_LINK ] && [ \$(readlink -f $CURRENT_LINK) == '$BLUE_DIR' ]; then echo 'blue'; else echo 'green'; fi"
+          $currentEnv = ssh ${{ secrets.VM_USERNAME }}@${{ secrets.VM_HOST }} $checkCurrentEnv
+          $nextEnv = if ($currentEnv -eq "blue") { "green" } else { "blue" }
+          $nextDir = if ($nextEnv -eq "blue") { $BLUE_DIR } else { $GREEN_DIR }
+          
+          Write-Host "Current environment: $currentEnv"
+          Write-Host "Next environment: $nextEnv"
+          Write-Host "Next directory: $nextDir"
+          
+          # Prepare the next environment
+          $prepareCommand = @"
+            # Create directories if they don't exist
+            mkdir -p $BLUE_DIR $GREEN_DIR
             
-            # Clean up existing deployment
-            Remove-Item -Path "C:\app" -Recurse -Force -ErrorAction SilentlyContinue
-            New-Item -ItemType Directory -Force -Path "C:\app"
-          '@
+            # Prepare the next environment
+            rm -rf $nextDir/*
+            mkdir -p $nextDir
+            
+            # Create the next symlink if it doesn't exist
+            if [ ! -L $NEXT_LINK ]; then
+              ln -s $nextDir $NEXT_LINK
+            else
+              rm $NEXT_LINK
+              ln -s $nextDir $NEXT_LINK
+            fi
+"@
           
-          ssh azureuser@$env:VM_HOST $cleanupCommand
+          ssh ${{ secrets.VM_USERNAME }}@${{ secrets.VM_HOST }} "$prepareCommand"
           
-          # Copy files to VM
-          scp -r ./* azureuser@$env:VM_HOST:/home/azureuser/app/
+          # Copy files to the next environment
+          scp -r ./* ${{ secrets.VM_USERNAME }}@${{ secrets.VM_HOST }}:$nextDir/
           
-          # Deploy and start the application
-          $deployCommand = @'
-            cd /home/azureuser/app
+          # Deploy and start the application in the next environment
+          $deployCommand = @"
+            cd $nextDir
             
             # Install dependencies
             npm install
             
-            # Check if port 80 is in use
-            netstat -ano | findstr :80
+            # Start the application on a different port (8080 for blue, 8081 for green)
+            PORT=$(if [ '$nextEnv' = 'blue' ]; then echo 8080; else echo 8081; fi)
+            
+            # Update the port in the application
+            sed -i "s/const PORT = .*/const PORT = $PORT;/" src/index.js
             
             # Start the application
-            Start-Process -FilePath "node" -ArgumentList "src/index.js" -RedirectStandardOutput "app.log" -RedirectStandardError "app.log" -NoNewWindow
+            nohup node src/index.js > app.log 2>&1 &
             
             # Wait for the application to start
-            Start-Sleep -Seconds 5
+            sleep 5
             
-            # Check if the process is running
-            Get-Process node
+            # Check if the application is responding
+            curl -s http://localhost:$PORT/sayHello
             
-            # Check the application logs
-            Get-Content app.log
-            
-            # Check if the port is actually listening
-            netstat -ano | findstr :80
-            
-            # Test the endpoint locally
-            Invoke-WebRequest -Uri "http://localhost/sayHello" -UseBasicParsing
-            
-            # Check system logs for any errors
-            Get-EventLog -LogName System -Newest 50 | Where-Object { $_.Source -like "*node*" -or $_.Message -like "*error*" }
-          '@
+            # If successful, update the nginx configuration to route traffic to the new instance
+            if [ $? -eq 0 ]; then
+              # Update nginx config to point to the new port
+              cat > /etc/nginx/conf.d/app.conf << EOF
+              server {
+                listen 80;
+                server_name _;
+                
+                location / {
+                  proxy_pass http://localhost:$PORT;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade \$http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host \$host;
+                  proxy_cache_bypass \$http_upgrade;
+                }
+              }
+              EOF
+              
+              # Reload nginx to apply changes
+              sudo systemctl reload nginx
+              
+              # Update the current symlink to point to the new environment
+              rm -f $CURRENT_LINK
+              ln -s $nextDir $CURRENT_LINK
+              
+              echo "Deployment successful! Switched to $nextEnv environment."
+            else
+              echo "Deployment failed! The application is not responding."
+              exit 1
+            fi
+"@
           
-          ssh azureuser@$env:VM_HOST $deployCommand 
+          ssh ${{ secrets.VM_USERNAME }}@${{ secrets.VM_HOST }} "$deployCommand"
+          
+          # Cleanup: Stop the old instance after successful deployment
+          $cleanupCommand = @"
+            # Get the old port
+            OLD_PORT=$(if [ '$nextEnv' = 'blue' ]; then echo 8081; else echo 8080; fi)
+            
+            # Find and stop the old process
+            OLD_PID=$(lsof -t -i:$OLD_PORT)
+            if [ ! -z "$OLD_PID" ]; then
+              echo "Stopping old process with PID $OLD_PID"
+              kill -15 $OLD_PID
+            fi
+"@
+          
+          ssh ${{ secrets.VM_USERNAME }}@${{ secrets.VM_HOST }} "$cleanupCommand"

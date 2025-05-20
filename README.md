@@ -29,13 +29,16 @@ curl http://localhost/sayHello
 
 The application is automatically deployed to the VM when changes are pushed to the main branch. The deployment process is handled by GitHub Actions.
 
-### Required GitHub Secrets
+### Zero-Downtime Deployment
 
-The following secrets need to be configured in your GitHub repository:
+The application uses a blue-green deployment strategy to ensure zero downtime during deployments:
 
-- `VM_HOST`: The hostname or IP address of the VM
-- `VM_USERNAME`: The username for SSH access
-- `VM_SSH_KEY`: The private SSH key for authentication
+1. Two environments (blue and green) are maintained on the server
+2. New code is deployed to the inactive environment
+3. Once the new deployment is verified, traffic is switched to the new environment
+4. The old environment is gracefully shut down
+
+This approach ensures that users experience no interruption in service during deployments.
 
 ## API Endpoints
 
@@ -48,4 +51,4 @@ Response:
 {
     "message": "Hello User"
 }
-``` 
+```

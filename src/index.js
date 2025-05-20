@@ -22,8 +22,8 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: 'Internal Server Error' });
 });
 
-// Start server on port 80 (requires admin privileges on most systems)
-const PORT = 80;
+// Use configurable port with fallback to 80
+const PORT = process.env.PORT || 80;
 const HOST = '0.0.0.0';
 
 const server = app.listen(PORT, HOST, (err) => {
